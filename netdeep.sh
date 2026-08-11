@@ -70,9 +70,12 @@ while [ $# -gt 0 ]; do
     --proxmox) PROXMOX=1; shift;;
     --fingerprint|--fp) FINGERPRINT=1; shift;;
     --rogue) ROGUE=1; shift;;
+    --vuln) VULN=1; shift;;
     --pve) PVE_NODE="$2"; shift 2;;
     --pve-token) PVE_TOKEN="$2"; shift 2;;
     --alert) ALERT=1; shift;;
+    --topo) TOPO="$2"; shift 2;;
+    --topo-out) TOPO_OUT="$2"; shift 2;;
     --json) JSON="$2"; shift 2;;
     --csv) CSV="$2"; shift 2;;
     --md) MD="$2"; shift 2;;
@@ -190,6 +193,7 @@ AN=(consolidate --nmap-xml "$XML" --arp "$ARP" --target "$TARGETSTR" --elapsed "
 [ "$PROXMOX" = 1 ] && AN+=(--proxmox)
 [ "$FINGERPRINT" = 1 ] && AN+=(--fingerprint)
 [ "$ROGUE" = 1 ] && AN+=(--rogue)
+[ "$VULN" = 1 ] && AN+=(--vuln)
 [ -n "$DB" ] && AN+=(--db "$DB")
 [ "$NOSTORE" = 1 ] && AN+=(--no-store)
 OUTJSON="${JSON:-$TMPJSON}"
@@ -209,6 +213,14 @@ if [ "$ALERT" = 1 ]; then
   log "[*] alerts"
   python3 "$DIR/alerts.py" fromscan --scan-json "$OUTJSON" 2>/dev/null || \
     log "    (alerts.py fromscan unavailable)"
+fi
+
+# topology map from the scan
+if [ -n "$TOPO" ]; then
+  log "[*] topology ($TOPO)"
+  TG=(graph --scan-json "$OUTJSON" --format "$TOPO")
+  [ -n "$TOPO_OUT" ] && TG+=(--out "$TOPO_OUT")
+  python3 "$DIR/topology.py" "${TG[@]}"
 fi
 
 # exports off the latest scan

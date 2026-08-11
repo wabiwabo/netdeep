@@ -711,7 +711,7 @@ def build_output(records, meta, changes):
             "type_signals": r["type_signals"], "ports": r["ports"], "app": r["app"],
             "risks": r["risks"], "sources": r["sources"], "label": r["label"],
             "first_seen": r["first_seen"], "last_seen": r["last_seen"], "changes": r["changes"],
-            "fingerprints": r.get("fingerprints")})
+            "fingerprints": r.get("fingerprints"), "risk_score": r.get("risk_score")})
     up = sum(1 for r in records.values() if r["state"] == "up")
     by_type = Counter(r["device_type"] for r in records.values())
     by_vendor = Counter(r["vendor"] for r in records.values() if r["vendor"])
@@ -842,6 +842,51 @@ def add_rogue(records, db):
             r["risks"].append(item)
 
 
+def dedup_risks(risks):
+    seen, out = set(), []
+    for x in risks:
+        k = (x.get("id"), x.get("port"))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(x)
+    return out
+
+
+def add_probes(records):
+    import probes
+    cports = {2375, 2376, 2379, 10250, 10255, 6443, 8443, 4646, 8500, 9000, 9443}
+    for ip, r in records.items():
+        ports = [p["port"] for p in r.get("ports", [])]
+        pset = set(ports)
+        found = []
+        if pset & cports:
+            try:
+                found += probes.container_probe(ip, ports) or []
+            except Exception:
+                pass
+        if pset & {443, 623, 8443}:
+            try:
+                b = probes.bmc_probe(ip) or {}
+                found += b.get("findings", [])
+                if b.get("redfish"):
+                    r["type_signals"].append("bmc:redfish")
+            except Exception:
+                pass
+        for rk in found:
+            r["risks"].append({"sev": rk["sev"], "id": rk["id"],
+                               "msg": rk["msg"], "port": rk.get("port")})
+
+
+def add_scores(records, db):
+    import vulns
+    for r in records.values():
+        try:
+            r["risk_score"] = vulns.score_host(r, db)
+        except Exception:
+            pass
+
+
 def cmd_consolidate(a):
     records = {}
     if a.nmap_xml and os.path.exists(a.nmap_xml) and os.path.getsize(a.nmap_xml) > 0:
@@ -864,6 +909,12 @@ def cmd_consolidate(a):
         safe(add_fingerprints, records, a.db)
     if getattr(a, "rogue", False):
         safe(add_rogue, records, a.db)
+    if getattr(a, "vuln", False):
+        safe(add_probes, records)
+    for r in records.values():
+        r["risks"] = dedup_risks(r["risks"])
+    if getattr(a, "vuln", False):
+        safe(add_scores, records, a.db)
     scan_id, changes = None, empty_changes()
     if not a.no_store:
         scan_id, changes = store_and_diff(a.db, a.target, sys.argv, records, a.nmap_xml)
@@ -1164,6 +1215,7 @@ def main():
     c.add_argument("--proxmox", action="store_true")
     c.add_argument("--fingerprint", action="store_true")
     c.add_argument("--rogue", action="store_true")
+    c.add_argument("--vuln", action="store_true")
     c.add_argument("--no-store", dest="no_store", action="store_true")
     c.add_argument("--terminal", action="store_true")
     c.set_defaults(fn=cmd_consolidate)

@@ -10,6 +10,11 @@ except Exception as _e:
     HAVE_ANALYZER = False
     ANALYZER_ERR = str(_e)
 
+try:
+    import query
+except Exception:
+    query = None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SH = os.path.join(HERE, "netdeep.sh")
 DB = getattr(analyzer, "DEFAULT_DB", os.path.expanduser("~/.netdeep/netdeep.db")) if HAVE_ANALYZER else os.path.expanduser("~/.netdeep/netdeep.db")
@@ -142,6 +147,12 @@ def highest_sev(host):
             br = rk
             best = str(r.get("sev", ""))
     return best or ""
+
+
+def risk_band(host):
+    rs = host.get("risk_score") or {}
+    b = rs.get("band")
+    return str(b) if b else highest_sev(host)
 
 
 def sev_attr(sev):
@@ -377,6 +388,16 @@ def ports_brief(h):
     return "%d: %s" % (len(nums), ",".join(nums))
 
 
+def col_widths(w):
+    # squeeze host/vendor on narrow terms so RISK stays visible
+    hostw, venw = 20, 14
+    if w < 92:
+        d = 92 - w
+        t = min(d, 8); hostw -= t; d -= t
+        venw -= min(d, 6)
+    return hostw, venw
+
+
 def detail_lines(host, changes):
     L = []
     def add(s, a=0):
@@ -417,6 +438,19 @@ def detail_lines(host, changes):
         for sk, sv in (scr or {}).items():
             first = str(sv).splitlines()[0] if sv else ""
             add("      %s: %s" % (sk, first), C_DIM)
+    rs = host.get("risk_score") or {}
+    if rs:
+        add("score: %s (%s)" % (rs.get("score", "?"), rs.get("band", "")), sev_attr(rs.get("band")))
+        for fk, fv in (rs.get("factors") or {}).items():
+            add("   %s: %s" % (fk, fv), C_DIM)
+    fp = host.get("fingerprints") or {}
+    if fp:
+        add("fingerprints:", C_CYN)
+        for port, d in fp.items():
+            for kk in ("jarm", "cert", "favicon", "http", "ssh"):
+                vv = (d or {}).get(kk)
+                if vv:
+                    add("   %s %-8s %s" % (port, kk, str(vv)[:40]), C_DIM)
     return L
 
 
@@ -569,22 +603,38 @@ def results_screen(stdscr, data, cfg):
     def current_list():
         hs = master
         if flt:
-            f = flt.lower()
-            hs = [h for h in hs if f in json.dumps(h, default=str).lower()]
+            if query is not None and ":" in flt:
+                out = []
+                for h in hs:
+                    try:
+                        if query.match(h, flt):
+                            out.append(h)
+                    except Exception:
+                        pass
+                hs = out
+            else:
+                f = flt.lower()
+                hs = [h for h in hs if f in json.dumps(h, default=str).lower()]
         return sort_hosts(hs, sort_mode)
 
     hosts = current_list()
     sel = 0
     off = 0
+    watch = False
+    watch_secs = 60
+    watch_deadline = 0.0
 
     while True:
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        hdr = " netdeep  sort:%s  %s%s" % (sort_mode, ("filter:%s " % flt) if flt else "", status)
+        wtag = ("  watch %ds" % max(0, int(watch_deadline - time.time()))) if watch else ""
+        hdr = " netdeep  sort:%s  %s%s%s" % (sort_mode, ("filter:%s " % flt) if flt else "", status, wtag)
         aw(stdscr, 0, 0, hdr.ljust(w), curses.A_REVERSE)
         # column header
-        aw(stdscr, 1, 0, "  %-15s %-20s %-14s %-12s %-14s %-6s %s" %
-           ("IP", "HOST", "VENDOR", "TYPE", "PORTS", "RISK", "CHG"), C_DIM)
+        hostw, venw = col_widths(w)
+        riskx = 48 + hostw + venw
+        aw(stdscr, 1, 0, "  %-15s %-*s %-*s %-12s %-14s %-6s %s" %
+           ("IP", hostw, "HOST", venw, "VENDOR", "TYPE", "PORTS", "RISK", "CHG"), C_DIM)
         rows = h - 4
         if sel < off:
             off = sel
@@ -596,27 +646,68 @@ def results_screen(stdscr, data, cfg):
             new = host.get("ip") in new_hosts
             base = curses.A_REVERSE if i == sel else (C_GRN if new else 0)
             mk = ">" if i == sel else " "
-            sev = highest_sev(host)
+            band = risk_band(host)
             chg = "NEW" if new else ("+" if host.get("changes") else "")
-            line = "%s %-15s %-20s %-14s %-12s %-14s %-6s %s" % (
-                mk, host.get("ip", ""), host_display(host)[:20],
-                (host.get("vendor", "") or "")[:14], (host.get("device_type", "") or "")[:12],
-                ports_brief(host)[:14], sev[:6], chg)
+            line = "%s %-15s %-*s %-*s %-12s %-14s %-6s %s" % (
+                mk, host.get("ip", ""), hostw, host_display(host)[:hostw],
+                venw, (host.get("vendor", "") or "")[:venw], (host.get("device_type", "") or "")[:12],
+                ports_brief(host)[:14], band[:6], chg)
             aw(stdscr, y, 0, line, base)
-            if i != sel and sev:
-                sa = sev_attr(sev)
+            if i != sel and band:
+                sa = sev_attr(band)
                 if sa:
-                    aw(stdscr, y, 80, sev[:6], sa)  # recolor risk cell if visible
+                    aw(stdscr, y, riskx, band[:6], sa)  # recolor risk cell
         aw(stdscr, h - 2, 0, status.ljust(w), C_DIM)
-        foot = " enter detail  s sort  / filter  o web  w wol  p ping  t trace  g ssh  c copy  n label  V stats  e export  r rescan  q quit "
+        foot = " enter detail  s sort  / filter  o web  w wol  p ping  t trace  g ssh  c copy  n label  V stats  e export  r rescan  W watch  q quit "
         aw(stdscr, h - 1, 0, foot, curses.A_REVERSE)
         stdscr.refresh()
 
+        stdscr.timeout(200 if watch else -1)
         ch = stdscr.getch()
+        stdscr.timeout(-1)
+        if ch == -1:
+            if watch and time.time() >= watch_deadline:
+                cur_ip = hosts[sel].get("ip") if hosts else None
+                nd = run_scan(stdscr, cfg)
+                if nd is None:
+                    watch = False
+                elif "_error" not in nd:
+                    data = nd
+                    changes = data.get("changes", {})
+                    new_hosts = set(changes.get("new_hosts", []))
+                    master = data.get("hosts", [])
+                    status = "%d hosts, %d up  scan %s" % (
+                        data.get("summary", {}).get("hosts", len(master)),
+                        data.get("summary", {}).get("up", 0),
+                        data.get("meta", {}).get("scan_id", ""))
+                    hosts = current_list()
+                    sel = next((i for i, x in enumerate(hosts) if x.get("ip") == cur_ip), 0)
+                    sel = min(sel, max(0, len(hosts) - 1))
+                watch_deadline = time.time() + watch_secs
+            continue
         if ch in (ord("q"), ord("Q")):
             return "quit"
         elif ch in (ord("r"),):
             return "rescan"
+        elif ch == ord("W"):
+            watch = not watch
+            watch_deadline = time.time() + watch_secs
+            status = ("watch on (%ds)" % watch_secs) if watch else "watch off"
+        elif ch == curses.KEY_MOUSE:
+            try:
+                _, _, my, _, _ = curses.getmouse()
+            except Exception:
+                continue
+            if my == 1 and hosts:
+                order = ["ip", "type", "vendor", "risk", "ports"]
+                sort_mode = order[(order.index(sort_mode) + 1) % len(order)]
+                cur_ip = hosts[sel].get("ip")
+                hosts = current_list()
+                sel = next((i for i, x in enumerate(hosts) if x.get("ip") == cur_ip), 0)
+            elif my >= 2:
+                idx = off + (my - 2)
+                if 0 <= idx < len(hosts):
+                    sel = idx
         elif ch == curses.KEY_UP and sel > 0:
             sel -= 1
         elif ch == curses.KEY_DOWN and sel < len(hosts) - 1:
@@ -708,6 +799,10 @@ def results_screen(stdscr, data, cfg):
 def tui_main(stdscr):
     curses.curs_set(0)
     stdscr.keypad(True)
+    try:
+        curses.mousemask(curses.ALL_MOUSE_EVENTS)
+    except Exception:
+        pass
     init_colors()
     cfg = default_config()
     while True:
@@ -729,6 +824,8 @@ SAMPLE = {
         "ports": [{"port": 8006, "proto": "tcp", "service": "https", "product": "pve-api",
                    "version": "8.1", "extra": "", "scripts": {"http-title": "Proxmox VE\nx"}}],
         "app": {"pve-manager": "8.1.4"}, "risks": [{"sev": "high", "id": "R1", "msg": "self-signed", "port": 8006}],
+        "risk_score": {"score": 7.5, "band": "high", "factors": {"exposure": "lan", "self_signed": True}},
+        "fingerprints": {"8006": {"jarm": "29d3fd00029d29d00042d43d0000005a1b2c3d", "http": "nginx", "cert": "CN=pve.lan"}},
         "sources": ["arp"], "label": "", "first_seen": "2026-01-01", "last_seen": "2026-01-02", "changes": []}],
     "summary": {"hosts": 1, "up": 1, "by_type": {"hypervisor": 1}, "by_vendor": {"Proxmox": 1},
                 "risks": {"high": 1}, "proxmox": ["192.168.1.10"]},
@@ -751,6 +848,10 @@ def main():
         assert rec["summary"]["by_type"] and rec["changes"]["new_hosts"]
         assert highest_sev(host) == "high"
         assert ports_brief(host).startswith("1:")
+        assert risk_band(host) == "high"
+        assert col_widths(120) == (20, 14) and col_widths(70)[0] < 20
+        dl = detail_lines(host, {})
+        assert any("score:" in s for s, _ in dl) and any("jarm" in s for s, _ in dl)
         return
     curses.wrapper(tui_main)
 

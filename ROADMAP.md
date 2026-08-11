@@ -22,8 +22,14 @@ Two primitives underpin most of it — build once, reuse everywhere:
 - sqlite history + diff (new/gone hosts, new/closed ports, version drift, first/last seen)
 - exports: json / csv / html / markdown / prometheus textfile
 - curses TUI: config, live scan, results, detail, stats, sort/filter, WoL, ssh/ping/traceroute, labels
+- **wave 1** — proxmox reconciliation (`pve.py`), passive + rogue/ARP-spoof/rogue-DHCP
+  detection (`passive.py`), fingerprint drift (`fingerprint.py`), alert fan-out (`alerts.py`)
+- **wave 2** — topology map (`topology.py`), vuln scoring + KEV/EPSS + nuclei (`vulns.py`),
+  container/BMC probes (`probes.py`)
+- **wave 3** — query DSL (`query.py`), web dashboard (`webdash.py`), MCP server (`mcpserver.py`),
+  TUI watch mode + sparkline-ready + mouse + DSL filter
 
-## wave 1 — infra-native killers
+## wave 1 — infra-native killers  (shipped)
 
 Zero/near-zero new deps. Aimed straight at the rogue-VM / ARP-conflict class of incident.
 
@@ -40,7 +46,7 @@ Zero/near-zero new deps. Aimed straight at the rogue-VM / ARP-conflict class of 
 - **alerting** (`alerts.py`). one `notify()` → ntfy / telegram / slack / discord / webhook /
   macOS `osascript`, and into the prometheus + zabbix you already run. stdlib urllib.
 
-## wave 2 — fleet map & vuln depth
+## wave 2 — fleet map & vuln depth  (shipped)
 
 - **topology** (`topology.py`). snmp switch FDB (mac→port→vlan) + merged traceroutes +
   proxmox virtual-L2 → DOT + mermaid (optional self-contained html graph). flat list → map.
@@ -49,10 +55,12 @@ Zero/near-zero new deps. Aimed straight at the rogue-VM / ARP-conflict class of 
   testssl.sh A–F per TLS endpoint. a ranked worklist, not a CVE dump. also: unauth
   container control-plane (docker 2375 / k8s / etcd — root-equiv = critical) and
   BMC/Redfish/IPMI discovery for physical hosts.
-- **classification v2** (`webfp.py`). favicon mmh3 hash + HTTP header/cookie fingerprint
-  (`PVEAuthCookie`→proxmox) + WS-Discovery / UPnP / mDNS-TXT deep-parse for model names.
+- **richer identification.** favicon mmh3 hash + HTTP header/cookie fingerprint
+  (`PVEAuthCookie`→proxmox) landed in `fingerprint.py`; WS-Discovery / UPnP / mDNS-TXT
+  deep-parse in `passive.py`. still todo: feed those signals back into `classify()` so the
+  device_type column gets them for free.
 
-## wave 3 — claude-native + ux
+## wave 3 — claude-native + ux  (shipped)
 
 - **query dsl** (`query.py`). the foundational compiler above.
 - **mcp server** (`mcpserver.py`). expose the sqlite over MCP so Claude Code answers

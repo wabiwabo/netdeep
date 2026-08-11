@@ -12,7 +12,20 @@ when they're around, degrades gracefully when they're not.
 - `analyzer.py` — consolidates a run: classification, risk flags, sqlite history + diff,
   and exports (json/csv/html/markdown/prometheus). stdlib only.
 - `netdeep-tui.py` — curses front-end. config form, live scan, results table with
-  drill-down, wake-on-lan, ssh/ping/traceroute, labels, exports.
+  drill-down, wake-on-lan, ssh/ping/traceroute, labels, watch mode, exports.
+- `fingerprint.py` — JARM, ssh host-key, cert, favicon, http/cookie fingerprints, with
+  baseline drift (a key or TLS stack that changes when you didn't touch it = red flag).
+- `passive.py` — passive listen (arp/mdns/ssdp/ws-discovery), gateway-MAC pin, ARP-spoof,
+  rogue-DHCP, new-MAC + hypervisor-OUI tagging (a stray `bc:24:11`/`52:54:00` = a new VM).
+- `pve.py` — Proxmox reconciliation. which VM owns this IP, which guest is invisible,
+  which live IP belongs to no guest at all.
+- `probes.py` — read-only container (docker/k8s/etcd/nomad/consul) + BMC/redfish/ipmi checks.
+- `vulns.py` — CISA-KEV + EPSS cache, risk scoring, nuclei/httpx/testssl orchestration.
+- `topology.py` — SNMP switch FDB + traceroute merge → DOT / mermaid / self-contained html map.
+- `alerts.py` — ntfy/telegram/slack/discord/webhook/macOS fan-out + zabbix/grafana/ansible.
+- `query.py` — filter DSL (`port:8006 type:proxmox risk:high seen:<7d`) shared by TUI/dash/mcp.
+- `webdash.py` — `serve` mode, a self-contained web dashboard off the sqlite history.
+- `mcpserver.py` — MCP server so Claude can answer "what changed on the LAN today".
 - `scan-8006.sh` — the dumb one-off. sweep a subnet for a single open port. no deps but `nc`.
 
 ## requirements
@@ -67,6 +80,12 @@ presets:
 | `--ssdp`     | passive: SSDP/UPnP discovery |
 | `--mdns`     | passive: mDNS/Bonjour discovery |
 | `--netbios`  | passive: NetBIOS name query |
+| `--fingerprint` | JARM/ssh-key/cert/favicon/http fingerprints + drift alarms |
+| `--rogue`    | ARP-spoof, rogue-DHCP, new-MAC + hypervisor-OUI detection |
+| `--vuln`     | container/BMC probes + KEV/EPSS-weighted risk score per host |
+| `--topo FMT` | write a topology map (`dot`/`mermaid`/`html`), with `--topo-out FILE` |
+| `--pve NODE --pve-token T` | reconcile a Proxmox cluster against the scan |
+| `--alert`    | fire ntfy/telegram/etc on new hosts + high/crit risks |
 | `[target]`   | trailing CIDR or host. omit for auto /24. |
 
 Passive discovery also reads the local ARP cache to surface silent hosts and flags
@@ -83,11 +102,59 @@ ARP conflicts (two MACs, one IP — someone's spoofing or you've got a dup).
 - **history** — every run lands in sqlite. `analyzer.py diff` shows what changed
   (new hosts, closed ports, new services) since last time.
 
+## going deeper
+
+```bash
+# fingerprint drift — baseline the fleet, get told when an ssh key or TLS stack changes
+sudo ./netdeep.sh -p infra --fingerprint 192.168.1.0/24
+
+# rogue hunt — new/unknown MACs, ARP-spoof, rogue DHCP, stray VM MACs
+sudo ./netdeep.sh --rogue
+
+# risk scoring — container/BMC exposure + KEV/EPSS-weighted score per host
+sudo ./netdeep.sh -p infra --vuln
+./vulns.py kev-update && ./vulns.py epss-update      # refresh the intel cache (cron it)
+
+# topology map straight out of the scan (+ SNMP FDB if you feed it a switch)
+sudo ./netdeep.sh --topo mermaid --topo-out lan.mmd
+./topology.py fdb --switch 192.168.1.1 --community public
+
+# proxmox: which VM owns that mystery IP, which guest is invisible, which IP is nobody's
+./pve.py reconcile --node 192.168.1.10 --token 'root@pam!scan=SECRET' --scan-json last.json
+```
+
+## ask claude (mcp)
+
+Point Claude Code at the scan history and ask it things in plain english —
+"what changed on the LAN today", "which hosts expose unauth services", "find the new device".
+
+```bash
+pip install mcp
+claude mcp add netdeep -e NETDEEP_DB=$HOME/.netdeep/history.db -- python3 $PWD/mcpserver.py
+```
+
+## web dashboard
+
+```bash
+./webdash.py serve                   # http://127.0.0.1:8787, live off the sqlite
+```
+
+## alerts
+
+Drop `~/.netdeep/alerts.json` (`ntfy`/`telegram`/`slack`/`discord`/`webhook`/`macos`/`zabbix`),
+then `--alert` pushes on new hosts + high/crit findings. Feeds your existing Prometheus/Zabbix too.
+
+```bash
+./alerts.py test                     # verify your transports
+sudo ./netdeep.sh -p infra --rogue --vuln --alert
+```
+
 ## history + diff
 
 ```bash
 sudo ./netdeep.sh -p infra          # run, results stored
 ./analyzer.py diff                   # what changed vs the previous run
+./query.py test --expr "port:8006 type:proxmox risk:high" --scan-json last.json
 ```
 
 ## exports
@@ -125,10 +192,15 @@ sudo ./netdeep-tui.py
 | `w`       | wake-on-lan the selected host |
 | `p`       | ping |
 | `t`       | traceroute |
-| `S`       | ssh to host |
+| `g`       | ssh to host |
+| `W`       | watch mode — auto-rescan on an interval |
+| `V`       | stats panel |
 | `e`       | export menu |
 | `r`       | rescan |
 | `q`       | quit |
+
+Filter (`/`) understands the `query.py` DSL — `port:8006 type:proxmox risk:high` — and
+falls back to plain substring. Mouse works too: click a row to select, click the header to sort.
 
 ## scan-8006.sh
 
@@ -154,7 +226,19 @@ only unless you know exactly what you're doing.
 
 ```
 netdeep.sh        orchestrator (discovery + scanning)
-analyzer.py       consolidation, risk, history/diff, exports
+analyzer.py       consolidation, risk, classification, history/diff, exports
 netdeep-tui.py    curses UI
+fingerprint.py    JARM/ssh-key/cert/favicon/http fingerprints + drift
+passive.py        passive discovery + rogue/ARP-spoof/rogue-DHCP detection
+pve.py            proxmox cluster reconciliation
+probes.py         container + BMC/redfish/ipmi checks
+vulns.py          KEV/EPSS cache, risk scoring, nuclei/httpx/testssl
+topology.py       switch FDB + traceroute → DOT/mermaid/html map
+alerts.py         ntfy/telegram/slack/webhook + zabbix/grafana/ansible
+query.py          filter DSL over hosts
+webdash.py        local web dashboard
+mcpserver.py      MCP server for Claude
 scan-8006.sh      single-port subnet sweep
 ```
+
+See `ROADMAP.md` for what's shipped and what's next.

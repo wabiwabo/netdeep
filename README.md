@@ -1,5 +1,11 @@
 # netdeep
 
+[![release](https://img.shields.io/github/v/release/wabiwabo/netdeep?color=blue)](https://github.com/wabiwabo/netdeep/releases)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
+![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+![deps](https://img.shields.io/badge/deps-stdlib-brightgreen)
+
 Recon and drift-watch for LANs you actually own: homelabs, proxmox fleets, the rack in
 the closet, the /24 where half the hosts are things you forgot you plugged in.
 

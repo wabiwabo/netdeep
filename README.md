@@ -3,9 +3,9 @@
 Recon and drift-watch for LANs you actually own: homelabs, proxmox fleets, the rack in
 the closet, the /24 where half the hosts are things you forgot you plugged in.
 
-![netdeep scanning a subnet](docs/demo.svg)
+![netdeep: scanning a subnet and drilling into a host](docs/netdeep-tui.gif)
 
-*(demo output, documentation-range IPs)*
+*(demo run against documentation-range hosts. no real network shown.)*
 
 Most scanners hand you a port list and call it a day. This one builds an inventory,
 figures out *what* each box is, fingerprints it, remembers it, and tells you when

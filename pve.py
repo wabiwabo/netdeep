@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-import argparse, json, os, re, ssl
+import argparse, hashlib, json, os, re, ssl, sys
 import http.client
 
 MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$", re.I)
 NET_RE = re.compile(r"net\d+$")
+PINS = os.path.expanduser("~/.netdeep/pve_pins.json")
+_warned = set()
 
 
 def norm_mac(s):
@@ -12,16 +14,58 @@ def norm_mac(s):
     return "".join(p.zfill(2) for p in re.split(r"[:\-.]", s.strip().lower()))
 
 
+def _pins():
+    try:
+        with open(PINS) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+# trust-on-first-use: record the cert sha on first sight, refuse to send the token
+# if it ever changes. rotated the cert on purpose? use --cacert or delete the pin.
+def _pin_ok(node, der):
+    sha = hashlib.sha256(der).hexdigest()
+    d = _pins()
+    cur = d.get(node)
+    if cur == sha:
+        return True
+    if cur:
+        if node not in _warned:
+            sys.stderr.write("pve: cert pin MISMATCH for %s — refusing to send token "
+                             "(rotated? --cacert, or delete it from %s)\n" % (node, PINS))
+            _warned.add(node)
+        return False
+    d[node] = sha
+    try:
+        os.makedirs(os.path.dirname(PINS), exist_ok=True)
+        tmp = PINS + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(d, f)
+        os.replace(tmp, PINS)
+    except Exception:
+        pass
+    return True
+
+
 # PVEAuditor is a built-in read-only role, so this token can enumerate but never mutate.
+# the token is a credential, so we never hand it to an unverified peer: with --cacert the
+# handshake is verified against the ca; otherwise we pin the leaf cert (tofu) before sending.
 def api_get(node, token, path, cacert=None, timeout=6):
     try:
         if cacert:
             ctx = ssl.create_default_context(cafile=cacert)
+            c = http.client.HTTPSConnection(node, 8006, timeout=timeout, context=ctx)
+            c.connect()
         else:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)   # self-signed pve certs are the norm
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-        c = http.client.HTTPSConnection(node, 8006, timeout=timeout, context=ctx)
+            c = http.client.HTTPSConnection(node, 8006, timeout=timeout, context=ctx)
+            c.connect()
+            if not _pin_ok(node, c.sock.getpeercert(binary_form=True)):
+                c.close()
+                return None
         c.request("GET", "/api2/json" + path,
                   headers={"Authorization": "PVEAPIToken=" + token.strip()})
         r = c.getresponse()

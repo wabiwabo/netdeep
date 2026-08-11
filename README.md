@@ -123,6 +123,12 @@ sudo ./netdeep.sh --topo mermaid --topo-out lan.mmd
 ./pve.py reconcile --node 192.168.1.10 --token 'root@pam!scan=SECRET' --scan-json last.json
 ```
 
+The token is a credential, so pve.py won't hand it to an unverified peer: pass
+`--cacert /etc/pve/pve-root-ca.pem` to verify against the CA, or let it pin the leaf cert
+on first use (trust-on-first-use) and refuse to send the token if that cert ever changes —
+same idea as SSH known-hosts. Rotated the cert on purpose? Re-pin with `--cacert` or delete
+the entry from `~/.netdeep/pve_pins.json`.
+
 ## ask claude (mcp)
 
 Point Claude Code at the scan history and ask it things in plain english —

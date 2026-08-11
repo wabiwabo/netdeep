@@ -73,6 +73,7 @@ while [ $# -gt 0 ]; do
     --vuln) VULN=1; shift;;
     --pve) PVE_NODE="$2"; shift 2;;
     --pve-token) PVE_TOKEN="$2"; shift 2;;
+    --pve-cacert) PVE_CACERT="$2"; shift 2;;
     --alert) ALERT=1; shift;;
     --topo) TOPO="$2"; shift 2;;
     --topo-out) TOPO_OUT="$2"; shift 2;;
@@ -205,7 +206,9 @@ python3 "$ANALYZER" "${AN[@]}"
 # proxmox cluster reconciliation against the scan
 if [ -n "$PVE_NODE" ] && [ -n "$PVE_TOKEN" ]; then
   log "[*] pve reconcile: $PVE_NODE"
-  python3 "$DIR/pve.py" reconcile --node "$PVE_NODE" --token "$PVE_TOKEN" --scan-json "$OUTJSON"
+  PV=(reconcile --node "$PVE_NODE" --token "$PVE_TOKEN" --scan-json "$OUTJSON")
+  [ -n "$PVE_CACERT" ] && PV+=(--cacert "$PVE_CACERT")
+  python3 "$DIR/pve.py" "${PV[@]}"
 fi
 
 # fire alerts on risks/changes from this scan

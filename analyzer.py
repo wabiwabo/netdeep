@@ -710,7 +710,8 @@ def build_output(records, meta, changes):
             "device_type": r["device_type"], "type_confidence": r["type_confidence"],
             "type_signals": r["type_signals"], "ports": r["ports"], "app": r["app"],
             "risks": r["risks"], "sources": r["sources"], "label": r["label"],
-            "first_seen": r["first_seen"], "last_seen": r["last_seen"], "changes": r["changes"]})
+            "first_seen": r["first_seen"], "last_seen": r["last_seen"], "changes": r["changes"],
+            "fingerprints": r.get("fingerprints")})
     up = sum(1 for r in records.values() if r["state"] == "up")
     by_type = Counter(r["device_type"] for r in records.values())
     by_vendor = Counter(r["vendor"] for r in records.values() if r["vendor"])
@@ -759,6 +760,88 @@ def print_summary(out):
 
 # --- subcommands ---
 
+def fp_value(v):
+    if isinstance(v, dict):
+        if "sha256" in v:
+            return v["sha256"]
+        if any(k in ("rsa", "ecdsa", "ed25519", "dsa") for k in v):
+            return ";".join("%s=%s" % (k, v[k]) for k in sorted(v))
+        prods = v.get("products") or []
+        s = "|".join([v.get("server") or ""] + sorted(prods))
+        return s or None
+    return v
+
+
+def add_fingerprints(records, db):
+    import fingerprint as fp
+    for ip, r in records.items():
+        ports = [p["port"] for p in r.get("ports", [])]
+        if not ports:
+            continue
+        try:
+            fps = fp.scan_host(ip, ports)
+        except Exception:
+            continue
+        if not fps:
+            continue
+        r["fingerprints"] = fps
+        for port, kinds in fps.items():
+            for t, v in kinds.items():
+                val = fp_value(v)
+                if not val:
+                    continue
+                d = fp.baseline_diff(ip, int(port), t, str(val), db)
+                if d.get("changed"):
+                    r["changes"].append("%s %s drift" % (port, t))
+                    r["risks"].append(mk("high", "fp-drift", "%s fingerprint changed" % t, int(port)))
+
+
+def default_gateway():
+    import subprocess
+    try:
+        out = subprocess.check_output(["route", "-n", "get", "default"],
+                                      text=True, stderr=subprocess.DEVNULL)
+        for ln in out.splitlines():
+            if "gateway:" in ln:
+                return ln.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["ip", "route"], text=True, stderr=subprocess.DEVNULL)
+        for ln in out.splitlines():
+            if ln.startswith("default"):
+                return ln.split()[2]
+    except Exception:
+        pass
+    return None
+
+
+def add_rogue(records, db):
+    import passive
+    scan_hosts = [{"ip": ip, "mac": r.get("mac")} for ip, r in records.items()]
+    try:
+        arp = passive.arp_cache() or []
+    except Exception:
+        arp = []
+    gw = default_gateway()
+    gwmac = next((e["mac"] for e in arp if e.get("ip") == gw), None)
+    try:
+        risks = passive.detect_rogue(scan_hosts, arp, None, gw, gwmac, db) or []
+    except Exception:
+        risks = []
+    for rk in risks:
+        ip = rk.get("ip")
+        item = {"sev": rk["sev"], "id": rk["id"], "msg": rk["msg"], "port": None}
+        if ip and ip in records:
+            records[ip]["risks"].append(item)
+        elif ip:
+            r = getrec(records, ip)
+            add_source(r, "arpcache")
+            if rk.get("mac"):
+                r["mac"] = rk["mac"]
+            r["risks"].append(item)
+
+
 def cmd_consolidate(a):
     records = {}
     if a.nmap_xml and os.path.exists(a.nmap_xml) and os.path.getsize(a.nmap_xml) > 0:
@@ -777,6 +860,10 @@ def cmd_consolidate(a):
     for r in records.values():
         classify(r)
         safe(risk_flags, r)
+    if getattr(a, "fingerprint", False):
+        safe(add_fingerprints, records, a.db)
+    if getattr(a, "rogue", False):
+        safe(add_rogue, records, a.db)
     scan_id, changes = None, empty_changes()
     if not a.no_store:
         scan_id, changes = store_and_diff(a.db, a.target, sys.argv, records, a.nmap_xml)
@@ -1075,6 +1162,8 @@ def main():
     c.add_argument("--netbios", action="store_true")
     c.add_argument("--mdns", action="store_true")
     c.add_argument("--proxmox", action="store_true")
+    c.add_argument("--fingerprint", action="store_true")
+    c.add_argument("--rogue", action="store_true")
     c.add_argument("--no-store", dest="no_store", action="store_true")
     c.add_argument("--terminal", action="store_true")
     c.set_defaults(fn=cmd_consolidate)

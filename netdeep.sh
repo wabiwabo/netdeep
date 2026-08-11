@@ -68,6 +68,11 @@ while [ $# -gt 0 ]; do
     --netbios) NETBIOS=1; shift;;
     --mdns) MDNS=1; shift;;
     --proxmox) PROXMOX=1; shift;;
+    --fingerprint|--fp) FINGERPRINT=1; shift;;
+    --rogue) ROGUE=1; shift;;
+    --pve) PVE_NODE="$2"; shift 2;;
+    --pve-token) PVE_TOKEN="$2"; shift 2;;
+    --alert) ALERT=1; shift;;
     --json) JSON="$2"; shift 2;;
     --csv) CSV="$2"; shift 2;;
     --md) MD="$2"; shift 2;;
@@ -183,12 +188,28 @@ AN=(consolidate --nmap-xml "$XML" --arp "$ARP" --target "$TARGETSTR" --elapsed "
 [ "$NETBIOS" = 1 ] && AN+=(--netbios)
 [ "$MDNS" = 1 ] && AN+=(--mdns)
 [ "$PROXMOX" = 1 ] && AN+=(--proxmox)
+[ "$FINGERPRINT" = 1 ] && AN+=(--fingerprint)
+[ "$ROGUE" = 1 ] && AN+=(--rogue)
 [ -n "$DB" ] && AN+=(--db "$DB")
 [ "$NOSTORE" = 1 ] && AN+=(--no-store)
-AN+=(--out "${JSON:-$TMPJSON}" --terminal)
+OUTJSON="${JSON:-$TMPJSON}"
+AN+=(--out "$OUTJSON" --terminal)
 
 log "[*] analyzer: python3 $ANALYZER ${AN[*]}"
 python3 "$ANALYZER" "${AN[@]}"
+
+# proxmox cluster reconciliation against the scan
+if [ -n "$PVE_NODE" ] && [ -n "$PVE_TOKEN" ]; then
+  log "[*] pve reconcile: $PVE_NODE"
+  python3 "$DIR/pve.py" reconcile --node "$PVE_NODE" --token "$PVE_TOKEN" --scan-json "$OUTJSON"
+fi
+
+# fire alerts on risks/changes from this scan
+if [ "$ALERT" = 1 ]; then
+  log "[*] alerts"
+  python3 "$DIR/alerts.py" fromscan --scan-json "$OUTJSON" 2>/dev/null || \
+    log "    (alerts.py fromscan unavailable)"
+fi
 
 # exports off the latest scan
 for pair in "csv:$CSV" "md:$MD" "prom:$PROM"; do
